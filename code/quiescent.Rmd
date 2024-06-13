@@ -1,0 +1,374 @@
+---
+title: "`r paste('quiescent/cycle signature', params$title)`"
+author: "Paolo Angelino"
+date: "`r Sys.Date()`"
+output:
+#  html_notebook:
+# 
+  html_document:
+    toc: true
+    toc_float: true
+    fig_height: 10
+    fig_width: 10
+    df_print: paged
+params:
+  seurat_object_dir: "/data/HUG/LSC"
+  quiescent_from_petros: "IM102_J7"
+  quiescent_signature: fromPetros/genedf.rds
+  title: "IM102"
+  file: "10X_IM102_J7_seurat.rds"
+  plots: "/data/HUG/LSC/plots"
+  recluster: TRUE
+  recluster.assay: "SCT"
+  cluster.resolution: 0.25 # 0.25
+  cluster.filter: NULL # !r c(5,6)
+  load.mclust: TRUE
+  load.mclust.quiescent: FALSE
+  genes.to.plot: !r c("CENPA", "BUB1", "MKI67") # NULL #
+  signatures.to.plot: NULL # !r c("CEBPA_gene_signature_.Sabatier_Birsen.", "X.Common.Down.regulated.genes.after.FLT3.inhibition..Birsen.", "SCD_FADS2_cluster", "MKI67_cluster")
+  scale.rna: TRUE
+  umap.filter: FALSE
+  umap.ident: "orig.ident"
+---
+
+```
+lapply(c("IM102_P0","IM102_P1","IM102_P2","IM102_J1","IM102_J7"), function(x) { rmarkdown::render("/data/HUG/Methylome/quiescent.Rmd", output_file=paste0("/data/HUG/LSC/LSC_quiescent_report.",x,".report.html"), params = list(quiescent_from_petros = x, title = x, file = paste0("10X_",x,"_seurat.rds"))) })
+lapply(c("IM84_P0","IM84_P1","IM84_P2","IM84_J1","IM84_J7"), function(x) { rmarkdown::render("/data/HUG/Methylome/quiescent.Rmd", output_file=paste0("/data/HUG/LSC/LSC_quiescent_report.",x,".report.html"), params = list(quiescent_from_petros = x, title = x, file = paste0("10X_",x,"_seurat.rds"))) })
+```
+
+<!-- Script setup -->
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(fig.width = 9, fig.height=6)
+```
+
+
+```{r}
+integrated.obj.file <- file.path(params$seurat_object_dir,params$file)
+```
+
+
+```{r}
+library(Seurat)
+# library(SeuratDisk)
+library(ggplot2)
+library(tidyverse)
+library(nclust)
+library(UCell)
+library(ggvenn)
+```
+
+```{r}
+# tweak ggplot theme
+# element_text(size=12,color='black',face='bold')
+My_Theme = theme( 
+  title = element_text(size = 26),
+  legend.key.size = unit(2, 'cm'), #change legend key size
+  legend.key.height = unit(1, 'cm'), #change legend key height
+  legend.key.width = unit(1, 'cm'), #change legend key width
+  legend.title = element_text(size=24), #change legend title font size
+  legend.text = element_text(size=24),
+  axis.title.x = element_text(size = 26),
+  axis.text.x = element_text(size = 24),
+  axis.text.y = element_text(size = 24),
+  axis.title.y = element_text(size = 26))
+FP_Theme = theme( 
+  title = element_text(size = 26),
+  legend.key.size = unit(2, 'cm'), #change legend key size
+  legend.key.height = unit(1, 'cm'), #change legend key height
+  legend.key.width = unit(1, 'cm'), #change legend key width
+  legend.title = element_text(size=24), #change legend title font size
+  legend.text = element_text(size=24),
+  axis.title.x = element_text(size = 26),
+  axis.text.x = element_text(size = 24),
+  axis.text.y = element_text(size = 24),
+  axis.title.y = element_text(size = 26),
+  legend.position = c(0.9,0.1), 
+  axis.title.y.right = element_text(size = 26))
+VP_Theme = theme( 
+  title = element_text(size = 26),
+  legend.key.size = unit(2, 'cm'), #change legend key size
+  legend.key.height = unit(1, 'cm'), #change legend key height
+  legend.key.width = unit(1, 'cm'), #change legend key width
+  legend.title = element_text(size=24), #change legend title font size
+  legend.text = element_text(size=24),
+  axis.title.x = element_text(size = 26),
+  axis.text.x = element_text(size = 24),
+  axis.text.y = element_text(size = 24),
+  axis.title.y = element_text(size = 26),  
+  axis.title.y.right = element_text(size = 26)) 
+```
+
+<!-- Read in data  -->
+
+read SC data
+```{r}
+integrated.obj <- readRDS(integrated.obj.file)
+```
+
+
+read lists of signatures
+```{r}
+library(readr)
+AMLCellType_Genesets <- read_delim(file.path(params$seurat_object_dir, "AMLCellType_Genesets.csv"),
+delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+#AMLCellType_Genesets <- read_delim("data/AMLCellType_Genesets.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+signatures <- lapply(AMLCellType_Genesets, function(x) x[!is.na(x)])
+gene.lists <- signatures
+# gene.lists <- lapply(gene.lists, function(x) {
+#   intersect(x, rownames(integrated.obj))
+# })
+
+gene.lists[which(sapply(gene.lists, length) == 0)] <- NULL
+listnames <- names(gene.lists)
+for (nn in 1:length(gene.lists)) {
+  listnames[nn] <- paste0(listnames[nn],"__",nn)
+}
+```
+
+
+# Heatmaps with cell cycle status
+
+## All genes
+
+```{r}
+DefaultAssay(object = integrated.obj) <- "RNA"
+x <- as.matrix(FetchData(object = integrated.obj, vars = rownames(integrated.obj), slot = "scale.data"))
+#x <- as.matrix(FetchData(object = integrated.obj, vars = rownames(integrated.obj), slot = "data"))
+```
+
+```{r, results = FALSE, fig.show='hide'}
+if(params$load.mclust){
+  myclust <- readRDS(file = sub("seurat", "nclust", integrated.obj.file))
+} else {
+  myclust <- coldmap(as.matrix(x))
+  saveRDS(file = sub("seurat", "nclust", integrated.obj.file), myclust)
+}
+```
+
+```{r, fig.width=10, fig.height=7}
+# ccl <- coldmap(t(as.matrix(clindf[,plotsig])), rlab=plotsig, cdend.col=list(list(c(200,250), "red")))
+# secitems(ccl$cclust, seeds=c(200, 250))
+annot <- integrated.obj[["seurat_clusters"]]
+annot$seurat_clusters <- as.character(annot$seurat_clusters)
+annot$SingleR_annot <- integrated.obj$SingleR_annot
+annot$Phase <- paste0("Phase_",integrated.obj$Phase)
+mrtag=make_tag(annot, varnames=c("seurat_clusters","SingleR_annot","Phase"),cols=c("violet","green3","orange"))
+mrtag <- mrtag[,order(colnames(mrtag))]  
+
+coldmap(x, clust=myclust, rmarg=3, clab=params$genes.to.plot, rtag = mrtag, rtag.space = 5)
+png(filename = paste0(params$plots,"/heatmap.all.",gsub(" ", "_", params$title),".png"), width = 960, height = 960)
+coldmap(x, clust=myclust, rmarg=3, clab=params$genes.to.plot, rtag = mrtag, rtag.space = 5)
+dev.off()
+pdf(file = paste0(params$plots,"/heatmap.all.",gsub(" ", "_", params$title),".pdf"), width = 9, height = 9)
+coldmap(x, clust=myclust, rmarg=3, clab=params$genes.to.plot, rtag = mrtag, rtag.space = 5)
+dev.off()
+```
+
+## UCELL signature heatmap
+
+```{r}
+x <- scale(as.matrix(FetchData(object = integrated.obj, vars = paste0(make.names(names(gene.lists)),"_UCell_kNN"))))
+colnames(x) <- sub("_UCell_kNN","",colnames(x))
+```
+
+```{r, results = FALSE, fig.show='hide'}
+if(params$load.mclust){
+  myclust <- readRDS(file = sub("seurat", "nclust_ucell_signatures", integrated.obj.file))
+} else {
+  myclust <- coldmap(as.matrix(x))
+  saveRDS(file = sub("seurat", "nclust_ucell_signatures", integrated.obj.file), myclust)
+}
+```
+
+```{r, fig.width=9, fig.height=7}
+# ccl <- coldmap(t(as.matrix(clindf[,plotsig])), rlab=plotsig, cdend.col=list(list(c(200,250), "red")))
+# secitems(ccl$cclust, seeds=c(200, 250))
+annot <- integrated.obj[["seurat_clusters"]]
+annot$seurat_clusters <- as.character(annot$seurat_clusters)
+annot$SingleR_annot <- integrated.obj$SingleR_annot
+annot$Phase <- paste0("Phase_",integrated.obj$Phase)
+mrtag=make_tag(annot, varnames=c("seurat_clusters","SingleR_annot","Phase"),cols=c("violet","green3","orange"))
+mrtag <- mrtag[,order(colnames(mrtag))]  
+
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+png(filename = paste0(params$plots,"/heatmap.ucell.",gsub(" ", "_", params$title),".png"), width = 960, height = 960)
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+dev.off()
+pdf(file = paste0(params$plots,"/heatmap.ucell.",gsub(" ", "_", params$title),".pdf"), width = 9, height = 9)
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+dev.off()
+```
+
+# Extract quiescent cells
+
+```{r}
+quiescent <- colnames(integrated.obj)[which(integrated.obj$Phase == "G1")]
+quiescent.not.monocytes <- colnames(integrated.obj)[which(integrated.obj$Phase == "G1" & !(integrated.obj$SingleR_annot == "Monocytes"))]
+```
+
+# Compare to Petros quiescent cells
+
+```{r}
+quiescent.Petros <- readRDS(file = file.path(params$seurat_object_dir,"fromPetros",paste0(params$quiescent_from_petros,"-quiescent-cells.rds")))
+integrated.obj$quiescent <- ifelse(colnames(integrated.obj) %in% quiescent.Petros, "quiescent","cycling")
+```
+
+```{r}
+length(intersect(quiescent, quiescent.Petros))
+venn_list <- list(seurat.G1 = quiescent, 
+                  quiescent = quiescent.Petros)
+  print(ggvenn(
+    venn_list, 
+    fill_color = c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF"),
+    stroke_size = 0.5, set_name_size = 4, show_percentage = FALSE
+  ) # + ggtitle(paste(n,": adjPval < ", params$alpha))
+  )
+```
+
+## UMAPs quiescent/cycling
+
+```{r}
+DimPlot(integrated.obj, reduction = "umap",pt.size = 2,label = FALSE, label.size = 15 ,repel = TRUE, group.by = "Phase") 
+```
+
+```{r}
+DimPlot(integrated.obj, reduction = "umap",pt.size = 2,label = FALSE, label.size = 15 ,repel = TRUE, group.by = "quiescent") 
+```
+
+```{r}
+table(integrated.obj$SingleR_annot, integrated.obj$quiescent)
+```
+
+# Score Petros quiescent signature
+
+```{r}
+quiescent.signature <- readRDS(file = file.path(params$seurat_object_dir,params$quiescent_signature))
+```
+
+```{r}
+
+lists.to.add <- list(quiescent = rownames(quiescent.signature)[which(quiescent.signature$gtype == "quiescent")],
+                     cycling = rownames(quiescent.signature)[which(quiescent.signature$gtype == "cycling")])
+
+if(length(lists.to.add)!=0){
+   integrated.obj <- AddModuleScore_UCell(
+     integrated.obj,
+     features=lists.to.add,
+     ncores = 8,
+     assay = DefaultAssay(integrated.obj),
+     slot = "data",
+     name= "_UCell")
+}
+
+
+integrated.obj <- SmoothKNN(integrated.obj,
+                           signature.names = paste0(make.names(names(lists.to.add)),"_UCell" ),
+                           reduction="pca")
+```
+
+# Plot Petros quiescent signature
+
+## UMAP quiescent signature
+
+```{r, echo=FALSE, results="asis"}
+for (nn in names(lists.to.add)) {
+  n <- paste0(make.names(nn),"_UCell_kNN" )
+  cat('## ',nn,'\n<details>\n
+  <summary>Click to expand!</summary>\n')
+  p1 <-  FeaturePlot(integrated.obj, reduction = "umap", features = n,  label = TRUE, label.size = 5, repel = TRUE, split.by = "orig.ident", pt.size = 2)
+  p2 <- VlnPlot(integrated.obj, features =n, split.by = "orig.ident") # split.plot = TRUE
+  p3 <- VlnPlot(integrated.obj, features =n, split.by = "seurat_clusters") # split.plot = TRUE
+  print(p1)
+  print(p2)
+  print(p3)
+  png(filename = paste0(params$plots,"/umap.", n, ".",gsub(" ", "_", params$title),".png"), width = 960*1.4, height = 960)
+  print(p1 & FP_Theme)
+  dev.off()
+  png(filename = paste0(params$plots,"/violin.", n, ".",gsub(" ", "_", params$title),".png"), width = 960*1.2, height = 960)
+  print(p2+ ylab("Signature Score") & VP_Theme)
+  dev.off()
+
+  cat('</details>\n')
+}
+```
+
+## signature heatmap, UCell kNN smoothed
+
+```{r}
+x <- scale(as.matrix(FetchData(object = integrated.obj, vars = paste0(make.names(c(names(gene.lists),names(lists.to.add))),"_UCell_kNN"))))
+colnames(x) <- sub("_UCell_kNN","",colnames(x))
+```
+
+```{r, results = FALSE, fig.show='hide'}
+if(params$load.mclust.quiescent){
+  myclust <- readRDS(file = sub("seurat", "nclust_ucell_signatures_quiescent_kNN", integrated.obj.file))
+} else {
+  myclust <- coldmap(as.matrix(x))
+  saveRDS(file = sub("seurat", "nclust_ucell_signatures_quiescent_kNN", integrated.obj.file), myclust)
+}
+```
+
+```{r, fig.width=9, fig.height=7}
+# ccl <- coldmap(t(as.matrix(clindf[,plotsig])), rlab=plotsig, cdend.col=list(list(c(200,250), "red")))
+# secitems(ccl$cclust, seeds=c(200, 250))
+annot <- integrated.obj[["seurat_clusters"]]
+annot$seurat_clusters <- as.character(annot$seurat_clusters)
+annot$SingleR_annot <- integrated.obj$SingleR_annot
+annot$Phase <- paste0("Phase_",integrated.obj$Phase)
+annot$quiescent <- paste0("status_",integrated.obj$quiescent)
+mrtag=make_tag(annot, varnames=c("seurat_clusters","SingleR_annot","Phase", "quiescent"),cols=c("violet","green3","orange","grey"))
+mrtag <- mrtag[,order(colnames(mrtag))]  
+
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+png(filename = paste0(params$plots,"/heatmap.ucell.",gsub(" ", "_", params$title),".png"), width = 960, height = 960)
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+dev.off()
+pdf(file = paste0(params$plots,"/heatmap.ucell.",gsub(" ", "_", params$title),".pdf"), width = 9, height = 9)
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+dev.off()
+```
+
+
+## signature heatmap, UCell
+
+```{r}
+x <- scale(as.matrix(FetchData(object = integrated.obj, vars = paste0(make.names(c(names(gene.lists),names(lists.to.add))),"_UCell"))))
+colnames(x) <- sub("_UCell","",colnames(x))
+```
+
+```{r, results = FALSE, fig.show='hide'}
+if(params$load.mclust.quiescent){
+  myclust <- readRDS(file = sub("seurat", "nclust_ucell_signatures_quiescent", integrated.obj.file))
+} else {
+  myclust <- coldmap(as.matrix(x))
+  saveRDS(file = sub("seurat", "nclust_ucell_signatures_quiescent", integrated.obj.file), myclust)
+}
+```
+
+```{r, fig.width=9, fig.height=7}
+# ccl <- coldmap(t(as.matrix(clindf[,plotsig])), rlab=plotsig, cdend.col=list(list(c(200,250), "red")))
+# secitems(ccl$cclust, seeds=c(200, 250))
+annot <- integrated.obj[["seurat_clusters"]]
+annot$seurat_clusters <- as.character(annot$seurat_clusters)
+annot$SingleR_annot <- integrated.obj$SingleR_annot
+annot$Phase <- paste0("Phase_",integrated.obj$Phase)
+annot$quiescent <- paste0("status_",integrated.obj$quiescent)
+mrtag=make_tag(annot, varnames=c("seurat_clusters","SingleR_annot","Phase", "quiescent"),cols=c("violet","green3","orange","grey"))
+mrtag <- mrtag[,order(colnames(mrtag))]  
+
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+png(filename = paste0(params$plots,"/heatmap.ucell.",gsub(" ", "_", params$title),".png"), width = 960, height = 960)
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+dev.off()
+pdf(file = paste0(params$plots,"/heatmap.ucell.",gsub(" ", "_", params$title),".pdf"), width = 9, height = 9)
+coldmap(x, clust=myclust, rmarg=3, clab=colnames(x), rtag = mrtag, rtag.space = 5)
+dev.off()
+```
+
+
